@@ -104,24 +104,56 @@ func fetchFollowers(cursor string) ([]Follower, string, error) {
 		url += "&cursor=" + cursor
 	}
 
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to make API request: %w", err)
-	}
-	defer resp.Body.Close()
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("Attempt %d: Making API request to URL: %s\n", attempt, url)
 
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read response body: %w", err)
+		// Log time before making the request
+		start := time.Now()
+		resp, err := http.Get(url)
+		if err != nil {
+			log.Printf("Failed to make API request: %v. Retrying...\n", err)
+			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			continue
+		}
+		log.Printf("API request successful after %v\n", time.Since(start))
+
+		defer resp.Body.Close()
+		log.Println("Reading response body...")
+
+		// Log time taken to read the response body
+		bodyStart := time.Now()
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Failed to read response body after %v: %v. Retrying...\n", time.Since(bodyStart), err)
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		log.Printf("Response body read in %v\n", time.Since(bodyStart))
+
+		// Check if the response is HTML (likely an error page)
+		if http.DetectContentType(body) == "text/html" {
+			log.Printf("Received HTML response (likely an error page), retrying after backoff...\n")
+			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			continue
+		}
+
+		// Log time taken to parse JSON
+		parseStart := time.Now()
+		log.Println("Parsing JSON response.")
+		var apiResp APIResponse
+		if err := json.Unmarshal(body, &apiResp); err != nil {
+			log.Printf("Failed to unmarshal JSON after %v: %v. Retrying after backoff...\n", time.Since(parseStart), err)
+			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			continue
+		}
+		log.Printf("JSON parsed in %v, new cursor: %s\n", time.Since(parseStart), apiResp.Cursor)
+
+		// If all goes well, return the parsed followers and new cursor
+		log.Printf("Returning %d followers and cursor %s\n", len(apiResp.Followers), apiResp.Cursor)
+		return apiResp.Followers, apiResp.Cursor, nil
 	}
 
-	var apiResp APIResponse
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, "", fmt.Errorf("failed to unmarshal JSON: %w", err)
-	}
-
-	log.Printf("Parsed %d followers from response.\n", len(apiResp.Followers))
-	return apiResp.Followers, apiResp.Cursor, nil
+	return nil, "", fmt.Errorf("exceeded max retries for cursor %s", cursor)
 }
 
 // saveFollowers inserts followers data into the database.
