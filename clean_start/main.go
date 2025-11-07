@@ -86,7 +86,12 @@ func (l *JSONLogger) log(level, msg string, fields map[string]interface{}) {
 	for k, v := range fields {
 		logEntry[k] = v
 	}
-	jsonBytes, _ := json.Marshal(logEntry)
+	jsonBytes, err := json.Marshal(logEntry)
+	if err != nil {
+		// Fallback to stderr if JSON marshaling fails
+		fmt.Fprintf(os.Stderr, "ERROR: Failed to marshal log entry: %v\n", err)
+		return
+	}
 	fmt.Println(string(jsonBytes))
 }
 
@@ -284,7 +289,9 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 		VALUES (?, ?, ?, ?, ?, ?);
 	`, tableName))
 	if err != nil {
-		tx.Rollback()
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("failed to prepare statement: %w, rollback failed: %v", err, rbErr)
+		}
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
 	defer stmt.Close()
@@ -299,7 +306,9 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 			follower.IndexedAt,
 		)
 		if err != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return fmt.Errorf("failed to execute statement: %w, rollback failed: %v", err, rbErr)
+			}
 			return fmt.Errorf("failed to execute statement: %w", err)
 		}
 	}
