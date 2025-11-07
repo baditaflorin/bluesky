@@ -265,7 +265,8 @@ func fetchFollowers(ctx context.Context, cursor string) ([]Follower, string, err
 		}
 
 		// Check if the response is HTML (likely an error page)
-		if http.DetectContentType(body) == "text/html; charset=utf-8" {
+		contentType := http.DetectContentType(body)
+		if strings.HasPrefix(contentType, "text/html") {
 			logger.Error("Received HTML response (likely an error page), retrying after backoff...", nil)
 			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 			continue

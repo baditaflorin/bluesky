@@ -205,7 +205,7 @@ func TestAPIResponseUnmarshal(t *testing.T) {
 	if follower.Handle != "testuser.bsky.social" {
 		t.Errorf("Expected handle 'testuser.bsky.social', got '%s'", follower.Handle)
 	}
-	if follower.Viewer.Muted != false {
+	if follower.Viewer.Muted {
 		t.Errorf("Expected Viewer.Muted to be false")
 	}
 	if follower.Viewer.Following != "at://did:plc:test123/app.bsky.graph.follow/test" {
