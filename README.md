@@ -10,7 +10,10 @@ A robust Go application for fetching and storing follower data from the Bluesky 
 - 🔁 **Resume Capability**: Can resume from a specific cursor if interrupted
 - ⚡ **Batch Processing**: Efficient transaction-based database operations
 - 🛡️ **Error Handling**: Comprehensive error handling and logging
-- 📝 **Detailed Logging**: Extensive logging for monitoring and debugging
+- 📝 **Structured Logging**: Support for both text and JSON logging formats
+- 🎯 **Context Support**: Graceful shutdown with context cancellation
+- 🚫 **Signal Handling**: Properly handles interrupt signals (Ctrl+C, SIGTERM)
+- 🔒 **Resource Management**: Proper closing of HTTP connections and database transactions
 
 ## Project Structure
 
@@ -54,6 +57,12 @@ cd clean_start
 go run main.go
 ```
 
+With JSON logging:
+```bash
+cd clean_start
+go run main.go -json
+```
+
 Or build and run:
 ```bash
 cd clean_start
@@ -70,11 +79,36 @@ cd resume_start
 go run main.go -cursor "your_cursor_here"
 ```
 
+With JSON logging:
+```bash
+cd resume_start
+go run main.go -cursor "your_cursor_here" -json
+```
+
 Or start from the beginning:
 ```bash
 cd resume_start
 go run main.go
 ```
+
+### Command-Line Options
+
+#### Clean Start
+
+- `-json`: Enable JSON-formatted structured logging (default: false)
+
+#### Resume Start
+
+- `-cursor`: Starting cursor for fetching followers (optional)
+- `-json`: Enable JSON-formatted structured logging (default: false)
+
+### Graceful Shutdown
+
+Both programs support graceful shutdown via interrupt signals (Ctrl+C or SIGTERM). When interrupted:
+- The current operation completes
+- The last successful cursor is logged
+- Database connections are properly closed
+- No data loss occurs
 
 ## Configuration
 
@@ -135,34 +169,67 @@ The application includes comprehensive error handling for:
 3. **Content Type Detection**: Identifies and handles HTML error pages
 4. **Transaction Rollback**: Ensures database consistency on errors
 5. **Resource Management**: Proper closing of HTTP response bodies to prevent leaks
+6. **Context Cancellation**: Supports graceful shutdown and cleanup
+7. **Signal Handling**: Catches interrupt signals for clean termination
 
 ## Logging
 
-The application provides detailed logging including:
-- API request attempts and timing
-- Response parsing status
-- Database operations
-- Error messages with context
-- Cursor progression
+The application provides two logging formats:
 
-## Examples
+### Text Logging (Default)
 
-### Example Output
+Human-readable log output suitable for development and debugging:
 
 ```
 2024/11/07 16:38:35 Initializing the database...
-2024/11/07 16:38:35 Database initialized successfully.
-2024/11/07 16:38:35 Fetching followers with cursor: 
-2024/11/07 16:38:35 Attempt 1: Making API request to URL: https://...
-2024/11/07 16:38:36 API request successful after 1.2s
+2024/11/07 16:38:35 Database initialized successfully
+2024/11/07 16:38:35 Fetching followers map[cursor:]
+```
+
+### JSON Logging
+
+Structured JSON logging suitable for production and log aggregation systems:
+
+```bash
+./main -json
+```
+
+Output:
+```json
+{"level":"INFO","message":"Initializing the database...","timestamp":"2024-11-07T16:38:35Z"}
+{"level":"INFO","message":"Database initialized successfully","timestamp":"2024-11-07T16:38:35Z"}
+{"level":"INFO","message":"Fetching followers","cursor":"","timestamp":"2024-11-07T16:38:35Z"}
+```
+
+## Examples
+
+### Example Text Output
+
+```
+2024/11/07 16:38:35 Initializing the database...
+2024/11/07 16:38:35 Database initialized successfully
+2024/11/07 16:38:35 Fetching followers map[cursor:]
+2024/11/07 16:38:35 Making API request map[attempt:1 url:https://...]
+2024/11/07 16:38:36 API request successful map[duration:1.2s]
 2024/11/07 16:38:36 Reading response body...
-2024/11/07 16:38:36 Response body read in 50ms
-2024/11/07 16:38:36 Parsing JSON response.
-2024/11/07 16:38:36 JSON parsed in 10ms, new cursor: abc123
-2024/11/07 16:38:36 Returning 30 followers and cursor abc123
-2024/11/07 16:38:36 Fetched 30 followers.
+2024/11/07 16:38:36 Response body read map[duration:50ms]
+2024/11/07 16:38:36 Parsing JSON response
+2024/11/07 16:38:36 JSON parsed map[duration:10ms new_cursor:abc123]
+2024/11/07 16:38:36 Returning followers map[count:30 cursor:abc123]
+2024/11/07 16:38:36 Fetched followers map[count:30]
 2024/11/07 16:38:36 Saving followers to the database...
-2024/11/07 16:38:36 Followers saved successfully.
+2024/11/07 16:38:36 Followers saved successfully
+```
+
+### Example JSON Output
+
+```json
+{"level":"INFO","message":"Initializing the database...","timestamp":"2024-11-07T16:38:35Z"}
+{"level":"INFO","message":"Database initialized successfully","timestamp":"2024-11-07T16:38:35Z"}
+{"level":"INFO","message":"Fetching followers","cursor":"","timestamp":"2024-11-07T16:38:35Z"}
+{"level":"INFO","message":"Making API request","attempt":1,"timestamp":"2024-11-07T16:38:35Z","url":"https://..."}
+{"level":"INFO","message":"API request successful","duration":"1.2s","timestamp":"2024-11-07T16:38:36Z"}
+{"level":"INFO","message":"Fetched followers","count":30,"timestamp":"2024-11-07T16:38:36Z"}
 ```
 
 ## Contributing
