@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -146,10 +146,18 @@ func fetchFollowers(cursor string) ([]Follower, string, error) {
 			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 			continue
 		}
-		defer resp.Body.Close()
+
+		// Check HTTP status code
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			log.Printf("API returned status %d: %s. Retrying...\n", resp.StatusCode, resp.Status)
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
 
 		log.Println("API request successful, reading response body.")
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
 			log.Printf("Failed to read response body: %v. Retrying...\n", err)
 			time.Sleep(time.Duration(attempt) * time.Second)
@@ -157,7 +165,7 @@ func fetchFollowers(cursor string) ([]Follower, string, error) {
 		}
 
 		// Check if the response is HTML (likely an error page)
-		if http.DetectContentType(body) == "text/html" {
+		if http.DetectContentType(body) == "text/html; charset=utf-8" {
 			log.Printf("Received HTML response (likely an error page), retrying after backoff...\n")
 			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 			continue
@@ -192,6 +200,7 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`, tableName))
 	if err != nil {
+		tx.Rollback()
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
 	defer stmt.Close()
@@ -220,7 +229,8 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 		)
 		if err != nil {
 			log.Printf("Failed to save follower %s: %v", follower.DID, err)
-			continue // Skip this record and continue
+			tx.Rollback()
+			return fmt.Errorf("failed to execute statement for follower %s: %w", follower.DID, err)
 		}
 		//log.Printf("Follower %s saved.", follower.DID)
 	}

@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	baseURL   = "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollowers?actor=did%3Aplc%3Az72i7hdynmk6r22z27h6tvur&limit=30"
-	dbFile    = "followers.db"
-	tableName = "followers"
+	baseURL    = "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollowers?actor=did%3Aplc%3Az72i7hdynmk6r22z27h6tvur&limit=30"
+	dbFile     = "followers.db"
+	tableName  = "followers"
+	maxRetries = 5
 )
 
 // Follower represents a follower's structure as per the JSON response.
@@ -117,12 +118,20 @@ func fetchFollowers(cursor string) ([]Follower, string, error) {
 		}
 		log.Printf("API request successful after %v\n", time.Since(start))
 
-		defer resp.Body.Close()
+		// Check HTTP status code
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			log.Printf("API returned status %d: %s. Retrying...\n", resp.StatusCode, resp.Status)
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+
 		log.Println("Reading response body...")
 
 		// Log time taken to read the response body
 		bodyStart := time.Now()
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
 			log.Printf("Failed to read response body after %v: %v. Retrying...\n", time.Since(bodyStart), err)
 			time.Sleep(time.Duration(attempt) * time.Second)
@@ -131,7 +140,7 @@ func fetchFollowers(cursor string) ([]Follower, string, error) {
 		log.Printf("Response body read in %v\n", time.Since(bodyStart))
 
 		// Check if the response is HTML (likely an error page)
-		if http.DetectContentType(body) == "text/html" {
+		if http.DetectContentType(body) == "text/html; charset=utf-8" {
 			log.Printf("Received HTML response (likely an error page), retrying after backoff...\n")
 			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 			continue
@@ -168,6 +177,7 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 		VALUES (?, ?, ?, ?, ?, ?);
 	`, tableName))
 	if err != nil {
+		tx.Rollback()
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
 	defer stmt.Close()
@@ -182,6 +192,7 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 			follower.IndexedAt,
 		)
 		if err != nil {
+			tx.Rollback()
 			return fmt.Errorf("failed to execute statement: %w", err)
 		}
 	}
