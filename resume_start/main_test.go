@@ -205,8 +205,11 @@ func TestAPIResponseUnmarshal(t *testing.T) {
 	if follower.Handle != "testuser.bsky.social" {
 		t.Errorf("Expected handle 'testuser.bsky.social', got '%s'", follower.Handle)
 	}
-	if !follower.Viewer.Muted && follower.Viewer.Following != "at://did:plc:test123/app.bsky.graph.follow/test" {
-		t.Errorf("Unexpected viewer data")
+	if follower.Viewer.Muted != false {
+		t.Errorf("Expected Viewer.Muted to be false")
+	}
+	if follower.Viewer.Following != "at://did:plc:test123/app.bsky.graph.follow/test" {
+		t.Errorf("Expected Viewer.Following to be 'at://did:plc:test123/app.bsky.graph.follow/test', got '%s'", follower.Viewer.Following)
 	}
 	if len(follower.Labels) != 1 || follower.Labels[0].Value != "test" {
 		t.Errorf("Expected 1 label with value 'test'")
