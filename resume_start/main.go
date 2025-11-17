@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -53,50 +57,139 @@ type APIResponse struct {
 	Cursor    string     `json:"cursor"`
 }
 
+// Logger interface for structured logging
+type Logger interface {
+	Info(msg string, fields map[string]interface{})
+	Error(msg string, fields map[string]interface{})
+}
+
+// TextLogger implements Logger with text output
+type TextLogger struct{}
+
+func (l *TextLogger) Info(msg string, fields map[string]interface{}) {
+	if len(fields) == 0 {
+		log.Println(msg)
+	} else {
+		log.Printf("%s %v\n", msg, fields)
+	}
+}
+
+func (l *TextLogger) Error(msg string, fields map[string]interface{}) {
+	if len(fields) == 0 {
+		log.Println("ERROR:", msg)
+	} else {
+		log.Printf("ERROR: %s %v\n", msg, fields)
+	}
+}
+
+// JSONLogger implements Logger with JSON output
+type JSONLogger struct{}
+
+func (l *JSONLogger) Info(msg string, fields map[string]interface{}) {
+	l.log("INFO", msg, fields)
+}
+
+func (l *JSONLogger) Error(msg string, fields map[string]interface{}) {
+	l.log("ERROR", msg, fields)
+}
+
+func (l *JSONLogger) log(level, msg string, fields map[string]interface{}) {
+	logEntry := map[string]interface{}{
+		"level":     level,
+		"message":   msg,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+	for k, v := range fields {
+		logEntry[k] = v
+	}
+	jsonBytes, err := json.Marshal(logEntry)
+	if err != nil {
+		// Fallback to stderr if JSON marshaling fails
+		fmt.Fprintf(os.Stderr, "ERROR: Failed to marshal log entry: %v\n", err)
+		return
+	}
+	fmt.Println(string(jsonBytes))
+}
+
+var logger Logger = &TextLogger{}
+
 func main() {
 	// Parse the starting cursor from command-line arguments.
 	startCursor := flag.String("cursor", "", "The starting cursor for fetching followers. If empty, starts from scratch.")
+	jsonLog := flag.Bool("json", false, "Enable JSON logging format")
 	flag.Parse()
 
+	// Set logger based on flag
+	if *jsonLog {
+		logger = &JSONLogger{}
+		log.SetOutput(io.Discard) // Disable default logger
+	}
+
+	// Set up context with cancellation for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle interrupt signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		logger.Info("Received interrupt signal, shutting down gracefully...", nil)
+		cancel()
+	}()
+
 	// Initialize the SQLite database.
-	log.Println("Initializing the database...")
+	logger.Info("Initializing the database...", nil)
 	db, err := initializeDB(dbFile)
 	if err != nil {
-		log.Fatalf("Database initialization failed: %v", err)
+		logger.Error("Database initialization failed", map[string]interface{}{"error": err.Error()})
+		os.Exit(1)
 	}
 	defer db.Close()
-	log.Println("Database initialized successfully.")
+	logger.Info("Database initialized successfully", nil)
 
 	// Start fetching followers from the specified cursor or from scratch.
 	cursor := *startCursor
 	for {
-		log.Printf("Fetching followers with cursor: %s\n", cursor)
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			logger.Info("Context cancelled, stopping fetch", map[string]interface{}{"last_cursor": cursor})
+			return
+		default:
+		}
+
+		logger.Info("Fetching followers", map[string]interface{}{"cursor": cursor})
 
 		// Fetch data from API and parse the result.
-		followers, newCursor, err := fetchFollowers(cursor)
+		followers, newCursor, err := fetchFollowers(ctx, cursor)
 		if err != nil {
-			log.Printf("Error fetching followers: %v. Applying backoff and retrying...\n", err)
+			if ctx.Err() != nil {
+				logger.Info("Context cancelled during fetch", nil)
+				return
+			}
+			logger.Error("Error fetching followers. Applying backoff and retrying...", map[string]interface{}{"error": err.Error()})
 			time.Sleep(2 * time.Second) // Short delay before retrying
 			continue
 		}
-		log.Printf("Fetched %d followers with cursor: %s\n", len(followers), cursor)
+		logger.Info("Fetched followers", map[string]interface{}{"count": len(followers), "cursor": cursor})
 
 		// Insert followers into the database in a single transaction for performance.
-		log.Println("Starting database transaction to save followers.")
+		logger.Info("Starting database transaction to save followers", nil)
 		if err := saveFollowers(db, followers); err != nil {
-			log.Printf("Error saving followers batch: %v", err)
+			logger.Error("Error saving followers batch", map[string]interface{}{"error": err.Error()})
 			continue
 		}
-		log.Println("Followers saved successfully.")
+		logger.Info("Followers saved successfully", nil)
 
 		// If there is no new cursor, we reached the end of the data.
 		if newCursor == "" {
-			log.Println("No new cursor found, all followers processed.")
+			logger.Info("No new cursor found, all followers processed", nil)
 			break
 		}
 
 		// Update cursor for the next iteration.
-		log.Printf("Updating cursor to: %s\n", newCursor)
+		logger.Info("Updating cursor", map[string]interface{}{"new_cursor": newCursor})
 		cursor = newCursor
 	}
 }
@@ -132,47 +225,68 @@ func initializeDB(dbFile string) (*sql.DB, error) {
 }
 
 // fetchFollowers makes an API request to get followers and returns them along with a cursor.
-func fetchFollowers(cursor string) ([]Follower, string, error) {
+func fetchFollowers(ctx context.Context, cursor string) ([]Follower, string, error) {
 	url := baseURL
 	if cursor != "" {
 		url += "&cursor=" + cursor
 	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		log.Printf("Attempt %d: Making API request to URL: %s\n", attempt, url)
-		resp, err := http.Get(url)
+		// Check if context is cancelled
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
+
+		logger.Info("Making API request", map[string]interface{}{"attempt": attempt, "url": url})
+
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			log.Printf("Failed to make API request: %v. Retrying...\n", err)
+			logger.Error("Failed to create request", map[string]interface{}{"error": err.Error()})
+			return nil, "", err
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			logger.Error("Failed to make API request. Retrying...", map[string]interface{}{"error": err.Error()})
 			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 			continue
 		}
-		defer resp.Body.Close()
 
-		log.Println("API request successful, reading response body.")
-		body, err := ioutil.ReadAll(resp.Body)
+		// Check HTTP status code
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			logger.Error("API returned non-OK status. Retrying...", map[string]interface{}{"status": resp.StatusCode})
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+
+		logger.Info("API request successful, reading response body", nil)
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
-			log.Printf("Failed to read response body: %v. Retrying...\n", err)
+			logger.Error("Failed to read response body. Retrying...", map[string]interface{}{"error": err.Error()})
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
 
 		// Check if the response is HTML (likely an error page)
-		if http.DetectContentType(body) == "text/html" {
-			log.Printf("Received HTML response (likely an error page), retrying after backoff...\n")
+		contentType := http.DetectContentType(body)
+		if strings.HasPrefix(contentType, "text/html") {
+			logger.Error("Received HTML response (likely an error page), retrying after backoff...", nil)
 			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 			continue
 		}
 
 		// Attempt to parse JSON response
-		log.Println("Parsing JSON response.")
+		logger.Info("Parsing JSON response", nil)
 		var apiResp APIResponse
 		if err := json.Unmarshal(body, &apiResp); err != nil {
-			log.Printf("Failed to unmarshal JSON: %v. Retrying after backoff...\n", err)
+			logger.Error("Failed to unmarshal JSON. Retrying after backoff...", map[string]interface{}{"error": err.Error()})
 			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 			continue
 		}
 
-		log.Printf("Parsed %d followers from response, new cursor: %s\n", len(apiResp.Followers), apiResp.Cursor)
+		logger.Info("Parsed followers from response", map[string]interface{}{"count": len(apiResp.Followers), "new_cursor": apiResp.Cursor})
 		return apiResp.Followers, apiResp.Cursor, nil
 	}
 
@@ -185,17 +299,19 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	log.Println("Database transaction started.")
+	logger.Info("Database transaction started", nil)
 
 	stmt, err := tx.Prepare(fmt.Sprintf(`
 		INSERT OR REPLACE INTO %s (did, handle, displayName, avatar, viewer_muted, viewer_blockedBy, viewer_following, labels, createdAt, description, indexedAt) 
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`, tableName))
 	if err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("failed to prepare statement: %w, rollback failed: %v", err, rbErr)
+		}
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
 	defer stmt.Close()
-	//log.Println("Prepared statement for inserting followers.")
 
 	for _, follower := range followers {
 		// Convert labels to a comma-separated string of "type:value"
@@ -219,16 +335,18 @@ func saveFollowers(db *sql.DB, followers []Follower) error {
 			follower.IndexedAt,
 		)
 		if err != nil {
-			log.Printf("Failed to save follower %s: %v", follower.DID, err)
-			continue // Skip this record and continue
+			logger.Error("Failed to save follower", map[string]interface{}{"did": follower.DID, "error": err.Error()})
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return fmt.Errorf("failed to execute statement for follower %s: %w, rollback failed: %v", follower.DID, err, rbErr)
+			}
+			return fmt.Errorf("failed to execute statement for follower %s: %w", follower.DID, err)
 		}
-		//log.Printf("Follower %s saved.", follower.DID)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
-	log.Println("Transaction committed successfully.")
+	logger.Info("Transaction committed successfully", nil)
 
 	return nil
 }
